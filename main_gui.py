@@ -1,7 +1,7 @@
 # main_gui.py
 import tkinter as tk
 from tkinter import ttk, scrolledtext
-from binance_client import get_usdt_futures_symbols
+from binance_client import get_usdt_futures_symbols, get_futures_ticker_data
 
 from monitoring_engine import MonitoringEngine
 
@@ -9,25 +9,64 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("바이낸스 선물 자동 알리미")
-        self.geometry("800x680") # 세로 길이 약간 늘림
+        self.geometry("1200x720") # 가로 크기 늘림
+
+        # 정렬 상태 변수
+        self.sort_column = "No"
+        self.sort_reverse = False
 
         # 엔진 초기화
         self.engine = MonitoringEngine(self)
 
+        # --- 메인 레이아웃 (좌우 분할) ---
+        main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        main_paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 메인 프레임
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # --- 왼쪽 프레임 (코인 목록) ---
+        left_frame = ttk.LabelFrame(main_paned_window, text="코인 시세", padding="10")
+        main_paned_window.add(left_frame, weight=1)
 
-        # --- 1. 상태 로그 프레임 (가장 먼저 생성) ---
-        log_frame = ttk.LabelFrame(main_frame, text="상태 로그", padding="10")
+        self.coin_list_tree = ttk.Treeview(
+            left_frame,
+            columns=("No", "Coin", "Price", "Change", "Volume"),
+            show="headings",
+            height=25
+        )
+        
+        # 스크롤바 추가
+        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.coin_list_tree.yview)
+        self.coin_list_tree.configure(yscrollcommand=scrollbar.set)
+
+        # 칼럼 제목 및 정렬 기능 추가
+        self.coin_list_tree.heading("No", text="순번", command=lambda: self.sort_treeview_column("No", False))
+        self.coin_list_tree.column("No", width=50, anchor=tk.CENTER)
+        self.coin_list_tree.heading("Coin", text="코인", command=lambda: self.sort_treeview_column("Coin", False))
+        self.coin_list_tree.column("Coin", width=120, anchor=tk.W)
+        self.coin_list_tree.heading("Price", text="현재가", command=lambda: self.sort_treeview_column("Price", False))
+        self.coin_list_tree.column("Price", width=100, anchor=tk.E)
+        self.coin_list_tree.heading("Change", text="등락률", command=lambda: self.sort_treeview_column("Change", False))
+        self.coin_list_tree.column("Change", width=80, anchor=tk.E)
+        self.coin_list_tree.heading("Volume", text="거래대금($)", command=lambda: self.sort_treeview_column("Volume", True))
+        self.coin_list_tree.column("Volume", width=120, anchor=tk.E)
+        
+        self.coin_list_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+
+        # --- 오른쪽 프레임 (기존 기능) ---
+        right_frame = ttk.Frame(main_paned_window)
+        main_paned_window.add(right_frame, weight=2)
+
+
+        # --- 1. 상태 로그 프레임 ---
+        log_frame = ttk.LabelFrame(right_frame, text="상태 로그", padding="10")
         log_frame.pack(fill=tk.X, expand=False, pady=5)
 
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state=tk.DISABLED)
         self.log_text.pack(fill=tk.X, expand=True)
 
         # --- 2. 조건 목록 프레임 ---
-        list_frame = ttk.LabelFrame(main_frame, text="알림 조건 목록", padding="10")
+        list_frame = ttk.LabelFrame(right_frame, text="알림 조건 목록", padding="10")
         list_frame.pack(fill=tk.X, expand=False, pady=5)
 
         self.condition_tree = ttk.Treeview(
@@ -54,66 +93,77 @@ class App(tk.Tk):
         self.condition_tree.column("Value", width=80, anchor=tk.CENTER)
 
         # --- 3. 조건 추가 프레임 ---
-        add_condition_frame = ttk.LabelFrame(main_frame, text="조건 추가", padding="10")
-        add_condition_frame.pack(fill=tk.X, pady=5)
+        self.add_condition_frame = ttk.LabelFrame(right_frame, text="조건 추가", padding="10")
+        self.add_condition_frame.pack(fill=tk.X, pady=5)
         
         # --- 위젯 데이터 ---
         self.timeframe_options = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
         coin_list = get_usdt_futures_symbols()
         self.coin_options = ["All Coins"] + coin_list
-        self.indicator_options = ["RSI", "Envelope", "BollingerBands"]
+        self.indicator_options = ["RSI", "Envelope", "BollingerBands", "MASlope"]
         self.operator_options = [">", ">=", "<", "<=", "=="]
 
         # --- 위젯 생성 및 배치 ---
-        add_condition_frame.columnconfigure(1, weight=1)
-        add_condition_frame.columnconfigure(3, weight=1)
+        self.add_condition_frame.columnconfigure(1, weight=1)
+        self.add_condition_frame.columnconfigure(3, weight=1)
 
         # 기본 조건 설정
-        ttk.Label(add_condition_frame, text="시간봉:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        self.timeframe_combo = ttk.Combobox(add_condition_frame, values=self.timeframe_options, state="readonly")
+        ttk.Label(self.add_condition_frame, text="시간봉:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.timeframe_combo = ttk.Combobox(self.add_condition_frame, values=self.timeframe_options, state="readonly")
         self.timeframe_combo.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
         self.timeframe_combo.set('5m')
 
-        ttk.Label(add_condition_frame, text="코인:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
-        self.coin_combo = ttk.Combobox(add_condition_frame, values=self.coin_options, state="readonly")
+        ttk.Label(self.add_condition_frame, text="코인:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        self.coin_combo = ttk.Combobox(self.add_condition_frame, values=self.coin_options, state="readonly")
         self.coin_combo.grid(row=0, column=3, padx=5, pady=5, sticky=tk.EW)
         self.coin_combo.set('All Coins')
 
-        ttk.Label(add_condition_frame, text="지표:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
-        self.indicator_combo = ttk.Combobox(add_condition_frame, values=self.indicator_options, state="readonly")
+        ttk.Label(self.add_condition_frame, text="지표:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        self.indicator_combo = ttk.Combobox(self.add_condition_frame, values=self.indicator_options, state="readonly")
         self.indicator_combo.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
         self.indicator_combo.set("RSI")
         
-        ttk.Label(add_condition_frame, text="세부 항목:").grid(row=1, column=2, padx=5, pady=5, sticky=tk.W)
-        self.indicator_detail_combo = ttk.Combobox(add_condition_frame, state="readonly")
+        ttk.Label(self.add_condition_frame, text="세부 항목:").grid(row=1, column=2, padx=5, pady=5, sticky=tk.W)
+        self.indicator_detail_combo = ttk.Combobox(self.add_condition_frame, state="readonly")
         self.indicator_detail_combo.grid(row=1, column=3, padx=5, pady=5, sticky=tk.EW)
 
         # 지표 파라미터 프레임
-        self.param_frame = ttk.Frame(add_condition_frame)
+        self.param_frame = ttk.Frame(self.add_condition_frame)
         self.param_frame.grid(row=2, column=0, columnspan=4, padx=5, pady=5, sticky=tk.EW)
         self.param_widgets = {}
 
         # 비교 조건 설정
-        ttk.Label(add_condition_frame, text="조건:").grid(row=3, column=0, padx=5, pady=5, sticky=tk.W)
-        self.operator_combo = ttk.Combobox(add_condition_frame, values=self.operator_options, state="readonly")
+        ttk.Label(self.add_condition_frame, text="조건:").grid(row=3, column=0, padx=5, pady=5, sticky=tk.W)
+        self.operator_combo = ttk.Combobox(self.add_condition_frame, values=self.operator_options, state="readonly")
         self.operator_combo.grid(row=3, column=1, padx=5, pady=5, sticky=tk.EW)
         self.operator_combo.set('>')
 
-        ttk.Label(add_condition_frame, text="기준값:").grid(row=3, column=2, padx=5, pady=5, sticky=tk.W)
-        self.value_entry = ttk.Entry(add_condition_frame)
+        ttk.Label(self.add_condition_frame, text="기준값:").grid(row=3, column=2, padx=5, pady=5, sticky=tk.W)
+        self.value_entry = ttk.Entry(self.add_condition_frame)
         self.value_entry.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
 
-        # 버튼
-        self.add_button = ttk.Button(add_condition_frame, text="추가하기", command=self.add_condition)
-        self.add_button.grid(row=3, column=4, padx=5, pady=5, sticky=tk.E)
-        
-        self.remove_button = ttk.Button(add_condition_frame, text="선택 삭제", command=self.remove_condition)
-        self.remove_button.grid(row=3, column=5, padx=5, pady=5, sticky=tk.E)
+        # --- 버튼 프레임 (오른쪽에 세로로 배치) ---
+        button_frame = ttk.Frame(self.add_condition_frame)
+        button_frame.grid(row=0, column=4, rowspan=4, sticky='ns', padx=(10, 0))
 
+        self.add_button = ttk.Button(button_frame, text="추가하기", command=self.add_condition)
+        self.add_button.pack(fill='x', pady=2)
+
+        self.modify_button = ttk.Button(button_frame, text="수정하기", command=self.modify_condition, state=tk.DISABLED)
+        self.modify_button.pack(fill='x', pady=2)
+        
+        self.remove_button = ttk.Button(button_frame, text="선택 삭제", command=self.remove_condition)
+        self.remove_button.pack(fill='x', pady=2)
+
+        self.clear_button = ttk.Button(button_frame, text="선택 해제", command=self.clear_condition_selection)
+        self.clear_button.pack(fill='x', pady=2)
+
+        # 이벤트 바인딩
         self.indicator_combo.bind("<<ComboboxSelected>>", self.update_indicator_details)
+        self.condition_tree.bind("<<TreeviewSelect>>", self.on_condition_select)
         
         # --- 4. 제어 프레임 ---
-        control_frame = ttk.Frame(main_frame)
+        control_frame = ttk.Frame(right_frame)
         control_frame.pack(fill=tk.X, pady=5)
 
         self.start_button = ttk.Button(control_frame, text="모니터링 시작", command=self.start_monitoring)
@@ -134,6 +184,7 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_indicator_details()
+        self.populate_coin_list_table()
 
     def update_progress(self, current, total):
         if total > 0:
@@ -154,26 +205,84 @@ class App(tk.Tk):
             widget.destroy()
         self.param_widgets = {}
 
+        # 조건 입력 위젯들을 일단 모두 숨김
+        self.value_entry.grid_remove()
+        if hasattr(self, 'maslope_value_combo'):
+            self.maslope_value_combo.grid_remove()
+        if hasattr(self, 'price_value_combo'):
+            self.price_value_combo.grid_remove()
+
+        # 다른 지표 선택 시, MASlope 전용 이벤트 바인딩 해제
+        self.indicator_detail_combo.unbind("<<ComboboxSelected>>")
+        self.operator_combo.grid(row=3, column=1, padx=5, pady=5, sticky=tk.EW)
+
         indicator = self.indicator_combo.get()
         details = []
         
         if indicator == "RSI":
             details = ["RSI Value"]
             self.add_param_entry("Length:", "14")
-        elif indicator == "Envelope":
-            details = ["Upper Band", "Lower Band", "Price"]
+            self.value_entry.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
+
+        elif indicator in ["Envelope", "BollingerBands"]:
+            if not hasattr(self, 'price_value_combo'):
+                self.price_value_combo = ttk.Combobox(self.add_condition_frame, state="readonly", width=15, values=["Close", "Open", "High", "Low"])
+            self.price_value_combo.set("Close")
+            self.price_value_combo.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
+            
+            if indicator == "Envelope":
+                details = ["Upper Band", "Lower Band", "Middle Band"]
+                self.add_param_entry("Length:", "20")
+                self.add_param_entry("Percent:", "5")
+            else: # BollingerBands
+                details = ["Upper Band", "Middle Band", "Lower Band"]
+                self.add_param_entry("Length:", "20")
+                self.add_param_entry("StdDev:", "2")
+
+        elif indicator == "MASlope":
+            details = ["Direction", "Change", "Slope"]
             self.add_param_entry("Length:", "20")
-            self.add_param_entry("Percent:", "5")
-        elif indicator == "BollingerBands":
-            details = ["Upper Band", "Middle Band", "Lower Band", "Price"]
-            self.add_param_entry("Length:", "20")
-            self.add_param_entry("StdDev:", "2")
+            self.indicator_detail_combo.bind("<<ComboboxSelected>>", self.update_maslope_options)
         
         self.indicator_detail_combo['values'] = details
         if details:
             self.indicator_detail_combo.set(details[0])
         else:
             self.indicator_detail_combo.set("")
+        
+        if indicator == "MASlope":
+            self.update_maslope_options()
+
+    def update_maslope_options(self, event=None):
+        indicator = self.indicator_combo.get()
+        if indicator != "MASlope":
+            return
+
+        detail = self.indicator_detail_combo.get()
+
+        # Hide all conditional widgets first
+        self.value_entry.grid_remove()
+        if hasattr(self, 'maslope_value_combo'):
+            self.maslope_value_combo.grid_remove()
+
+        self.operator_combo.grid(row=3, column=1, padx=5, pady=5, sticky=tk.EW)
+
+        if detail == "Slope":
+            self.value_entry.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
+            self.operator_combo.set('>')
+        elif detail in ["Direction", "Change"]:
+            if not hasattr(self, 'maslope_value_combo'):
+                self.maslope_value_combo = ttk.Combobox(self.add_condition_frame, state="readonly", width=15)
+            
+            if detail == "Direction":
+                self.maslope_value_combo['values'] = ["Rising", "Falling"]
+                self.maslope_value_combo.set("Rising")
+            else: # Change
+                self.maslope_value_combo['values'] = ["Turned Up", "Turned Down"]
+                self.maslope_value_combo.set("Turned Up")
+            
+            self.operator_combo.set("==")
+            self.maslope_value_combo.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
 
     def add_param_entry(self, label_text, default_value):
         label = ttk.Label(self.param_frame, text=label_text)
@@ -186,41 +295,122 @@ class App(tk.Tk):
         
         self.param_widgets[label_text.replace(":", "")] = entry
 
-    def add_condition(self):
+    def _get_condition_data_from_widgets(self):
         timeframe = self.timeframe_combo.get()
         coin = self.coin_combo.get()
         indicator = self.indicator_combo.get()
         detail = self.indicator_detail_combo.get()
         operator = self.operator_combo.get()
-        value = self.value_entry.get().strip()
+        
+        value = ""
+        if indicator == "MASlope" and detail in ["Direction", "Change"]:
+            value = self.maslope_value_combo.get()
+        elif indicator in ["Envelope", "BollingerBands"]:
+            value = self.price_value_combo.get()
+        else:
+            value = self.value_entry.get().strip()
 
-        # 기준값이 비어 있으면 'price'로 간주
         if not value:
-            value = 'price'
+             self.log("기준값을 입력해주세요.")
+             return None
 
         params = {}
         for name, widget in self.param_widgets.items():
             params[name.lower()] = widget.get()
-        
         params_str = ", ".join([f"{k}={v}" for k, v in params.items()])
 
         if not all([timeframe, coin, indicator, detail, operator]):
             self.log("시간봉, 코인, 지표, 세부 항목, 조건은 필수입니다.")
-            return
+            return None
         
-        # 값 유효성 검사 (숫자 또는 'price')
-        if value.lower() != 'price':
+        # 숫자값이어야 하는 조건들에 대해 유효성 검사
+        if indicator == "RSI" or (indicator == "MASlope" and detail == "Slope"):
             try:
                 float(value)
             except ValueError:
-                self.log("기준값은 숫자이거나 비워두어야 합니다(현재가 비교).")
-                return
+                self.log(f"'{detail}'에 대한 기준값은 숫자여야 합니다.")
+                return None
 
-        condition_data = (timeframe, coin, indicator, params_str, detail, operator, value)
-        self.condition_tree.insert("", tk.END, values=condition_data)
-        self.log(f"새 조건 추가: {condition_data}")
-        # 추가 후 입력 필드 초기화
+        return (timeframe, coin, indicator, params_str, detail, operator, value)
+
+    def add_condition(self):
+        condition_data = self._get_condition_data_from_widgets()
+        if condition_data:
+            self.condition_tree.insert("", tk.END, values=condition_data)
+            self.log(f"새 조건 추가: {condition_data}")
+            self.clear_condition_selection()
+
+    def modify_condition(self):
+        selected_items = self.condition_tree.selection()
+        if not selected_items:
+            self.log("수정할 조건을 목록에서 선택해주세요.")
+            return
+        
+        condition_data = self._get_condition_data_from_widgets()
+        if condition_data:
+            self.condition_tree.item(selected_items[0], values=condition_data)
+            self.log(f"조건 수정: {condition_data}")
+            self.clear_condition_selection()
+
+    def on_condition_select(self, event):
+        selected_items = self.condition_tree.selection()
+        if selected_items:
+            self.load_condition_to_widgets(selected_items[0])
+            self.modify_button.config(state=tk.NORMAL)
+
+    def load_condition_to_widgets(self, item_id):
+        values = self.condition_tree.item(item_id, 'values')
+        timeframe, coin, indicator, params_str, detail, operator, value = values
+
+        # Set the main combos first
+        self.timeframe_combo.set(timeframe)
+        self.coin_combo.set(coin)
+        self.indicator_combo.set(indicator)
+        
+        # Manually update the details list and available widgets
+        self.update_indicator_details()
+
+        # NOW, set the detail for the selected indicator
+        self.indicator_detail_combo.set(detail)
+        
+        # If the indicator is MASlope, the sub-widgets (for value) must be updated again
+        # based on the now-correct detail value.
+        if indicator == 'MASlope':
+            self.update_maslope_options()
+
+        # Set the remaining widgets
+        self.operator_combo.set(operator)
+
+        if params_str:
+            params = dict(p.split('=') for p in params_str.split(', '))
+            for name, widget in self.param_widgets.items():
+                if name.lower() in params:
+                    widget.delete(0, tk.END)
+                    widget.insert(0, params[name.lower()])
+
+        # Set the correct value widget based on the indicator and detail
+        if indicator == 'MASlope' and detail in ["Direction", "Change"]:
+            self.maslope_value_combo.set(value)
+        elif indicator in ["Envelope", "BollingerBands"]:
+            self.price_value_combo.set(value)
+        else:
+            self.value_entry.delete(0, tk.END)
+            self.value_entry.insert(0, value)
+
+    def clear_condition_selection(self):
+        # Clear selection in the treeview
+        if self.condition_tree.selection():
+            self.condition_tree.selection_remove(self.condition_tree.selection())
+        
+        # Reset input widgets to default
+        self.timeframe_combo.set('5m')
+        self.coin_combo.set('All Coins')
+        self.indicator_combo.set('RSI')
+        self.update_indicator_details() # This will reset sub-widgets
         self.value_entry.delete(0, tk.END)
+        
+        # Disable modify button
+        self.modify_button.config(state=tk.DISABLED)
 
     def remove_condition(self):
         selected_items = self.condition_tree.selection()
@@ -231,6 +421,7 @@ class App(tk.Tk):
         for item in selected_items:
             self.condition_tree.delete(item)
             self.log("선택한 조건을 삭제했습니다.")
+        self.clear_condition_selection() # 선택 해제 및 폼 초기화
 
     def log(self, message):
         import datetime
@@ -263,6 +454,106 @@ class App(tk.Tk):
         self.log("애플리케이션을 종료합니다...")
         self.stop_monitoring()
         self.destroy()
+
+    def populate_coin_list_table(self):
+        self.log("코인 시세 정보를 업데이트합니다...")
+        try:
+            trading_symbols = set(get_usdt_futures_symbols())
+            tickers = get_futures_ticker_data()
+            if not tickers:
+                self.log("시세 정보를 가져오지 못했습니다.")
+                return
+
+            filtered_tickers = [t for t in tickers if t['symbol'] in trading_symbols]
+
+            # 기존 목록 삭제
+            for item in self.coin_list_tree.get_children():
+                self.coin_list_tree.delete(item)
+
+            # 등락률 색상 태그 설정
+            self.coin_list_tree.tag_configure("red", foreground="#d1403d")
+            self.coin_list_tree.tag_configure("blue", foreground="#0a59f7")
+
+            for i, ticker in enumerate(sorted(filtered_tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True), 1):
+                try:
+                    symbol = ticker['symbol']
+                    price = float(ticker['lastPrice'])
+                    change_percent = float(ticker['priceChangePercent'])
+                    volume_usd = float(ticker['quoteVolume'])
+
+                    # 거래대금 포맷 (K, M, B)
+                    if volume_usd >= 1_000_000_000:
+                        volume_str = f"{volume_usd / 1_000_000_000:.2f}B"
+                    elif volume_usd >= 1_000_000:
+                        volume_str = f"{volume_usd / 1_000_000:.2f}M"
+                    else:
+                        volume_str = f"{volume_usd / 1_000:.2f}K"
+
+                    # 등락률 색상 태그
+                    color_tag = "normal"
+                    if change_percent > 0:
+                        color_tag = "red"
+                    elif change_percent < 0:
+                        color_tag = "blue"
+
+                    self.coin_list_tree.insert(
+                        "", tk.END,
+                        values=(i, symbol, f"{price:.4f}", f"{change_percent:+.2f}%", volume_str),
+                        tags=(color_tag,)
+                    )
+                except (ValueError, KeyError):
+                    # 데이터가 불완전한 티커는 건너뜁니다.
+                    pass
+
+            self.log(f"거래 가능한 {len(filtered_tickers)}개 코인 시세 업데이트 완료.")
+        except Exception as e:
+            self.log(f"시세 정보 업데이트 중 오류 발생: {e}")
+
+    def sort_treeview_column(self, col, reverse):
+        """Treeview 칼럼을 클릭하여 정렬하는 함수"""
+        try:
+            data = [(self.coin_list_tree.set(item, col), item) for item in self.coin_list_tree.get_children('')]
+        except tk.TclError:
+            # 칼럼이 존재하지 않을 경우 무시
+            return
+
+        # 데이터 타입에 따른 정렬 키 설정
+        def sort_key(item):
+            value = item[0]
+            if col == "No" or col == "Price" or col == "Change":
+                # 숫자 변환을 위해 특수 문자(%, +) 제거
+                value = value.replace('%', '').replace('+', '')
+                try:
+                    return float(value)
+                except ValueError:
+                    return 0.0
+            elif col == "Volume":
+                value_lower = value.lower()
+                num_part = value_lower.replace('k', '').replace('m', '').replace('b', '')
+                try:
+                    num = float(num_part)
+                    if 'b' in value_lower:
+                        return num * 1_000_000_000
+                    if 'm' in value_lower:
+                        return num * 1_000_000
+                    if 'k' in value_lower:
+                        return num * 1_000
+                    return num
+                except ValueError:
+                    return 0
+            return value # 코인 이름은 문자열로 정렬
+
+        # 정렬 방향 결정
+        if col == self.sort_column:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = col
+            self.sort_reverse = reverse
+
+        data.sort(key=sort_key, reverse=self.sort_reverse)
+
+        for index, (val, item) in enumerate(data):
+            self.coin_list_tree.move(item, '', index)
 
 if __name__ == "__main__":
     try:

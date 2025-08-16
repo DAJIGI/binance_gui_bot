@@ -16,7 +16,7 @@ def get_usdt_futures_symbols():
     try:
         exchange_info = client.futures_exchange_info()
         symbols = [s['symbol'] for s in exchange_info['symbols'] 
-                   if s['quoteAsset'] == 'USDT' and s['contractType'] == 'PERPETUAL']
+                   if s['quoteAsset'] == 'USDT' and s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
         print(f"총 {len(symbols)}개의 USDT 선물 코인을 찾았습니다.")
         return symbols
     except Exception as e:
@@ -30,6 +30,16 @@ def get_historical_klines(symbol, interval, limit=100):
         return klines
     except Exception as e:
         print(f"{symbol} {interval} 캔들 데이터를 가져오는 데 실패했습니다: {e}")
+        return []
+
+def get_futures_ticker_data():
+    """USDT 기반 모든 선물 코인의 24시간 티커 정보를 가져옵니다."""
+    try:
+        tickers = client.futures_ticker()
+        usdt_tickers = [t for t in tickers if t['symbol'].endswith('USDT')]
+        return usdt_tickers
+    except Exception as e:
+        print(f"바이낸스 선물 티커 정보를 가져오는 데 실패했습니다: {e}")
         return []
 
 if __name__ == '__main__':
