@@ -1,5 +1,6 @@
 # main_gui.py
 import tkinter as tk
+import threading
 from tkinter import ttk, scrolledtext
 from binance_client import get_usdt_futures_symbols, get_futures_ticker_data
 
@@ -71,12 +72,16 @@ class App(tk.Tk):
 
         self.condition_tree = ttk.Treeview(
             list_frame, 
-            columns=("Timeframe", "Coin", "Indicator", "Parameters", "Detail", "Operator", "Value"), 
+            columns=("Group", "Shift", "Timeframe", "Coin", "Indicator", "Parameters", "Detail", "Operator", "Value"), 
             show="headings",
             height=5
         )
         self.condition_tree.pack(fill=tk.X, expand=True)
 
+        self.condition_tree.heading("Group", text="그룹")
+        self.condition_tree.column("Group", width=60, anchor=tk.CENTER)
+        self.condition_tree.heading("Shift", text="N봉 전")
+        self.condition_tree.column("Shift", width=50, anchor=tk.CENTER)
         self.condition_tree.heading("Timeframe", text="시간봉")
         self.condition_tree.column("Timeframe", width=60, anchor=tk.CENTER)
         self.condition_tree.heading("Coin", text="코인")
@@ -100,7 +105,7 @@ class App(tk.Tk):
         self.timeframe_options = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
         coin_list = get_usdt_futures_symbols()
         self.coin_options = ["All Coins"] + coin_list
-        self.indicator_options = ["RSI", "Envelope", "BollingerBands", "MASlope"]
+        self.indicator_options = ["RSI", "Envelope", "BollingerBands", "MASlope", "MA_Compare", "Candle_Trend", "MA_Trend"]
         self.operator_options = [">", ">=", "<", "<=", "=="]
 
         # --- 위젯 생성 및 배치 ---
@@ -117,6 +122,15 @@ class App(tk.Tk):
         self.coin_combo = ttk.Combobox(self.add_condition_frame, values=self.coin_options, state="readonly")
         self.coin_combo.grid(row=0, column=3, padx=5, pady=5, sticky=tk.EW)
         self.coin_combo.set('All Coins')
+
+        ttk.Label(self.add_condition_frame, text="그룹:").grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
+        self.group_entry = ttk.Entry(self.add_condition_frame, width=10)
+        self.group_entry.grid(row=0, column=5, padx=5, pady=5, sticky=tk.W)
+
+        ttk.Label(self.add_condition_frame, text="N봉 전:").grid(row=1, column=4, padx=5, pady=5, sticky=tk.W)
+        self.shift_entry = ttk.Entry(self.add_condition_frame, width=10)
+        self.shift_entry.grid(row=1, column=5, padx=5, pady=5, sticky=tk.W)
+        self.shift_entry.insert(0, "0")
 
         ttk.Label(self.add_condition_frame, text="지표:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
         self.indicator_combo = ttk.Combobox(self.add_condition_frame, values=self.indicator_options, state="readonly")
@@ -144,7 +158,7 @@ class App(tk.Tk):
 
         # --- 버튼 프레임 (오른쪽에 세로로 배치) ---
         button_frame = ttk.Frame(self.add_condition_frame)
-        button_frame.grid(row=0, column=4, rowspan=4, sticky='ns', padx=(10, 0))
+        button_frame.grid(row=0, column=6, rowspan=4, sticky='ns', padx=(10, 0))
 
         self.add_button = ttk.Button(button_frame, text="추가하기", command=self.add_condition)
         self.add_button.pack(fill='x', pady=2)
@@ -219,6 +233,14 @@ class App(tk.Tk):
         indicator = self.indicator_combo.get()
         details = []
         
+        # Set operator options based on indicator
+        if indicator in ["Candle_Consecutive_Rise", "MA_Consecutive_Rise"]:
+            self.operator_combo['values'] = ['==', '>', '>=']
+            self.operator_combo.set('==')
+        else:
+            self.operator_combo['values'] = self.operator_options
+            self.operator_combo.set('>')
+        
         if indicator == "RSI":
             details = ["RSI Value"]
             self.add_param_entry("Length:", "14")
@@ -243,6 +265,21 @@ class App(tk.Tk):
             details = ["Direction", "Change", "Slope"]
             self.add_param_entry("Length:", "20")
             self.indicator_detail_combo.bind("<<ComboboxSelected>>", self.update_maslope_options)
+
+        elif indicator == "MA_Compare":
+            details = ["Percentage"]
+            self.add_param_entry("Short MA:", "20")
+            self.add_param_entry("Long MA:", "60")
+            self.value_entry.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
+
+        elif indicator == "Candle_Trend":
+            details = ["Open 상승", "Open 하락", "High 상승", "High 하락", "Low 상승", "Low 하락", "Close 상승", "Close 하락"]
+            self.value_entry.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
+
+        elif indicator == "MA_Trend":
+            details = ["연속 상승", "연속 하락"]
+            self.add_param_entry("Length:", "20")
+            self.value_entry.grid(row=3, column=3, padx=5, pady=5, sticky=tk.EW)
         
         self.indicator_detail_combo['values'] = details
         if details:
@@ -296,6 +333,12 @@ class App(tk.Tk):
         self.param_widgets[label_text.replace(":", "")] = entry
 
     def _get_condition_data_from_widgets(self):
+        group = self.group_entry.get().strip()
+        try:
+            shift = int(self.shift_entry.get().strip())
+        except ValueError:
+            self.log("'N봉 전' 값은 숫자(정수)여야 합니다.")
+            return None
         timeframe = self.timeframe_combo.get()
         coin = self.coin_combo.get()
         indicator = self.indicator_combo.get()
@@ -324,14 +367,20 @@ class App(tk.Tk):
             return None
         
         # 숫자값이어야 하는 조건들에 대해 유효성 검사
-        if indicator == "RSI" or (indicator == "MASlope" and detail == "Slope"):
+        if indicator == "RSI" or (indicator == "MASlope" and detail == "Slope") or indicator == "MA_Compare":
             try:
                 float(value)
             except ValueError:
                 self.log(f"'{detail}'에 대한 기준값은 숫자여야 합니다.")
                 return None
+        elif indicator in ["Candle_Trend", "MA_Trend"]:
+            try:
+                int(value)
+            except ValueError:
+                self.log(f"'{indicator}'에 대한 기준값은 숫자(정수)여야 합니다.")
+                return None
 
-        return (timeframe, coin, indicator, params_str, detail, operator, value)
+        return (group, shift, timeframe, coin, indicator, params_str, detail, operator, value)
 
     def add_condition(self):
         condition_data = self._get_condition_data_from_widgets()
@@ -360,7 +409,12 @@ class App(tk.Tk):
 
     def load_condition_to_widgets(self, item_id):
         values = self.condition_tree.item(item_id, 'values')
-        timeframe, coin, indicator, params_str, detail, operator, value = values
+        group, shift, timeframe, coin, indicator, params_str, detail, operator, value = values
+
+        self.group_entry.delete(0, tk.END)
+        self.group_entry.insert(0, group)
+        self.shift_entry.delete(0, tk.END)
+        self.shift_entry.insert(0, shift)
 
         # Set the main combos first
         self.timeframe_combo.set(timeframe)
@@ -408,6 +462,9 @@ class App(tk.Tk):
         self.indicator_combo.set('RSI')
         self.update_indicator_details() # This will reset sub-widgets
         self.value_entry.delete(0, tk.END)
+        self.group_entry.delete(0, tk.END)
+        self.shift_entry.delete(0, tk.END)
+        self.shift_entry.insert(0, "0")
         
         # Disable modify button
         self.modify_button.config(state=tk.DISABLED)
@@ -440,9 +497,16 @@ class App(tk.Tk):
         self.stop_button.config(state=tk.NORMAL)
 
     def stop_monitoring(self):
-        self.engine.stop()
-        self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
+        thread = threading.Thread(target=self._threaded_stop, daemon=True)
+        thread.start()
+
+    def _threaded_stop(self):
+        self.engine.stop()
+        self.after(0, self._finalize_stop)
+
+    def _finalize_stop(self):
+        self.start_button.config(state=tk.NORMAL)
 
     def get_conditions(self):
         conditions = []
@@ -452,8 +516,12 @@ class App(tk.Tk):
 
     def on_closing(self):
         self.log("애플리케이션을 종료합니다...")
-        self.stop_monitoring()
-        self.destroy()
+        if self.engine.is_running:
+            self.stop_monitoring()
+            # Give the stop thread a moment to start and run
+            self.after(100, self.destroy)
+        else:
+            self.destroy()
 
     def populate_coin_list_table(self):
         self.log("코인 시세 정보를 업데이트합니다...")
@@ -560,4 +628,5 @@ if __name__ == "__main__":
         app = App()
         app.mainloop()
     except Exception as e:
-        print(f"App 객체 생성 또는 mainloop 실행 중 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
