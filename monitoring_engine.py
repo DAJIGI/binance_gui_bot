@@ -311,7 +311,8 @@ class MonitoringEngine:
         elif indicator == "Candle_Trend":
             try:
                 n = int(value_str)
-                price_series = df[detail.lower()]
+                price_series_key = detail.split(' ')[0].lower()
+                price_series = df[price_series_key]
                 
                 if len(price_series) < 2 + shift:
                     return False, ""
