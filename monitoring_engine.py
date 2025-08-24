@@ -17,8 +17,8 @@ def parse_params(params_str):
     params = {}
     for p in params_str.split(','):
         try:
-            key, value = p.strip().split('=')
-            # 값을 적절한 타입으로 변환 (정수, 실수)
+            # split의 maxsplit을 1로 설정하여 'long ma'와 같은 키를 올바르게 처리
+            key, value = p.strip().split('=', 1)
             if '.' in value:
                 params[key] = float(value)
             else:
@@ -52,9 +52,9 @@ class MonitoringEngine:
             return
         
         self.is_running = False
-        self.stop_event.set() # 잠든 스레드를 즉시 깨움
+        self.stop_event.set()
         if self.thread and self.thread.is_alive():
-            self.thread.join() # 스레드가 완전히 종료될 때까지 대기
+            self.thread.join()
         
         self.app.log("모니터링을 중지합니다.")
         self.app.reset_progress()
@@ -74,88 +74,76 @@ class MonitoringEngine:
                     if self.stop_event.wait(timeout=30): break
                     continue
 
-                # 조건들을 그룹별로 분류
-                grouped_conditions = {}
-                individual_conditions = []
-                symbols_to_check_in_cycle = set()
-
-                for cond in conditions:
-                    group, shift, timeframe, coin, indicator, params_str, detail, operator, value_str = cond
+                # 1. 조건들을 (코인, 시간봉) 기준으로 재구성
+                tasks = {}
+                for cond_values in conditions:
+                    group, shift, timeframe, coin, indicator, params_str, detail, operator, value_str = cond_values
                     
-                    if coin == "All Coins":
-                        symbols_to_check_in_cycle.update(all_symbols)
-                    else:
-                        symbols_to_check_in_cycle.add(coin)
+                    symbols_for_cond = all_symbols if coin == "All Coins" else [coin]
+                    
+                    for symbol in symbols_for_cond:
+                        task_key = (symbol, timeframe)
+                        if task_key not in tasks:
+                            tasks[task_key] = []
+                        
+                        tasks[task_key].append({
+                            'group': group, 'shift': int(shift), 'indicator': indicator, 
+                            'params_str': params_str, 'detail': detail, 'operator': operator, 
+                            'value_str': value_str, 'original_cond_values': cond_values
+                        })
 
-                    condition_data = (shift, timeframe, coin, indicator, params_str, detail, operator, value_str)
-                    if group:
-                        if group not in grouped_conditions:
-                            grouped_conditions[group] = []
-                        grouped_conditions[group].append(condition_data)
-                    else:
-                        individual_conditions.append(condition_data)
-
-                total_count = len(symbols_to_check_in_cycle)
+                # 2. 작업 목록 순회
+                total_count = len(tasks)
                 self.app.update_progress(0, total_count)
                 checked_count = 0
-
-                for symbol in sorted(list(symbols_to_check_in_cycle)):
+                
+                for (symbol, timeframe), cond_list in tasks.items():
                     if not self.is_running: break
                     checked_count += 1
                     self.app.update_progress(checked_count, total_count)
                     if checked_count % 50 == 0: time.sleep(0.5)
 
-                    # 1. 개별 조건 확인
-                    for cond_data in individual_conditions:
-                        if not self.is_running: break
-                        shift, timeframe, coin_cond, indicator, params_str, detail, operator, value_str = cond_data
-                        if coin_cond == symbol or coin_cond == "All Coins":
-                            alert_key = f"{symbol}|{shift}|{timeframe}|{indicator}|{params_str}|{detail}|{operator}|{value_str}"
-                            if now - self.last_alert_times.get(alert_key, 0) < 300:
-                                continue
-                            try:
-                                is_met, display_str = self.check_condition(symbol, timeframe, indicator, params_str, detail, operator, value_str, shift)
-                                if is_met:
-                                    final_alert_messages.append(f"- {symbol} ({timeframe}, {shift}봉 전): {display_str}")
-                                    self.last_alert_times[alert_key] = now
-                            except Exception as e:
-                                self.app.log(f"[{symbol}] 개별 조건 확인 중 오류: {e}")
+                    # 2.1. 데이터 가져오기 및 지표 계산
+                    df = self._get_data_and_indicators(symbol, timeframe, cond_list)
+                    if df is None or df.empty:
+                        continue
 
-                    # 2. 그룹 조건 확인
-                    for group_name, group_conds in grouped_conditions.items():
+                    # 2.2. 조건 평가
+                    group_results = {}
+                    for cond in cond_list:
                         if not self.is_running: break
                         
-                        first_cond_coin = group_conds[0][2]
-                        if first_cond_coin != symbol and first_cond_coin != "All Coins":
+                        alert_key = f"{symbol}|{cond['original_cond_values']}"
+                        if now - self.last_alert_times.get(alert_key, 0) < 300:
                             continue
 
+                        is_met, display_str = self._evaluate_condition(df, cond)
+
+                        if is_met:
+                            self.app.log(f"[조건 만족] {symbol} ({timeframe}, {cond['shift']}봉 전) - {display_str}")
+                        
+                        if cond['group']:
+                            group_name = cond['group']
+                            if group_name not in group_results:
+                                group_results[group_name] = {'met_all': True, 'details': []}
+                            
+                            group_results[group_name]['details'].append(f"  - ({timeframe}, {cond['shift']}봉 전) {display_str}")
+                            if not is_met:
+                                group_results[group_name]['met_all'] = False
+                        elif is_met:
+                            final_alert_messages.append(f"- {symbol} ({timeframe}, {cond['shift']}봉 전): {display_str}")
+                            self.last_alert_times[alert_key] = now
+                
+                    # 2.3. 그룹 조건 최종 판정
+                    for group_name, result in group_results.items():
                         group_alert_key = f"{symbol}|{group_name}"
-                        if now - self.last_alert_times.get(group_alert_key, 0) < 300:
-                            continue
-
-                        all_conditions_in_group_met = True
-                        group_display_strs = []
+                        if now - self.last_alert_times.get(group_alert_key, 0) < 300: continue
                         
-                        for cond_data in group_conds:
-                            shift, timeframe, _, indicator, params_str, detail, operator, value_str = cond_data
-                            try:
-                                is_met, display_str = self.check_condition(symbol, timeframe, indicator, params_str, detail, operator, value_str, shift)
-                                if not is_met:
-                                    all_conditions_in_group_met = False
-                                    break 
-                                group_display_strs.append(f"  - ({timeframe}, {shift}봉 전) {display_str}")
-                            except Exception as e:
-                                self.app.log(f"[{symbol}] 그룹 '{group_name}' 조건 확인 중 오류: {e}")
-                                all_conditions_in_group_met = False
-                                break
-                        
-                        if all_conditions_in_group_met:
-                            alert_message = f"그룹 '{group_name}' 조건 동시 만족!\n- {symbol}\n" + "\n".join(group_display_strs)
+                        if result['met_all']:
+                            alert_message = f"그룹 '{group_name}' 조건 동시 만족!\n- {symbol}\n" + "\n".join(result['details'])
                             final_alert_messages.append(alert_message)
                             self.last_alert_times[group_alert_key] = now
 
-                    if not self.is_running: break
-                
                 if not self.is_running: break
                 
                 if final_alert_messages:
@@ -186,25 +174,44 @@ class MonitoringEngine:
                 self.app.reset_progress()
                 if self.stop_event.wait(timeout=60): break
 
-    def check_condition(self, symbol, timeframe, indicator, params_str, detail, operator, value_str, shift=0):
-        """개별 코인에 대한 조건을 확인하고 (만족 여부, 결과 문자열)을 반환합니다."""
-        klines = get_historical_klines(symbol, timeframe, limit=200)
-        if not klines or len(klines) < 50:
-            return False, ""
+    def _get_data_and_indicators(self, symbol, timeframe, cond_list):
+        max_len = 0
+        for cond in cond_list:
+            params = parse_params(cond['params_str'])
+            # 모든 기간 관련 파라미터를 확인하여 최대값 계산
+            cond_max_len = 0
+            if 'length' in params: cond_max_len = max(cond_max_len, params.get('length', 0))
+            if 'long ma' in params: cond_max_len = max(cond_max_len, params.get('long ma', 0))
+            
+            max_len = max(max_len, cond_max_len + cond['shift'])
 
-        # shift 값 유효성 검사
-        if not (0 <= shift < len(klines) - 5): # 최소 5개 캔들은 확보
-            return False, ""
+        limit = min(max_len + 50, 1500)
+        if limit < 50: limit = 50
+
+        klines = get_historical_klines(symbol, timeframe, limit=limit)
+        if not klines or len(klines) < max_len + 5:
+            return None
 
         df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
         for col in ['close', 'high', 'low', 'open']:
             df[col] = pd.to_numeric(df[col])
+        return df
 
-        params = parse_params(params_str)
+    def _evaluate_condition(self, df_original, cond):
+        df = df_original.copy()
+        params = parse_params(cond['params_str'])
+        shift = cond['shift']
+        indicator = cond['indicator']
+        detail = cond['detail']
+        operator = cond['operator']
+        value_str = cond['value_str']
+
+        if not (0 <= shift < len(df) - 5):
+            return False, ""
+
         condition_met = False
         full_display_str = ""
 
-        # ... (기존 지표 계산 로직)
         if indicator in ["RSI", "Envelope", "BollingerBands"]:
             indicator_value = None
             indicator_col_name = ""
@@ -229,15 +236,15 @@ class MonitoringEngine:
                         elif col.startswith("BBM_") and "Middle" in detail: indicator_col_name = col; break
                         elif col.startswith("BBL_") and "Lower" in detail: indicator_col_name = col; break
                 
-                if indicator_col_name and indicator_col_name in df.columns:
+                if indicator_col_name and indicator_col_name in df.columns and len(df) > shift:
                     indicator_value = df[indicator_col_name].iloc[-1 - shift]
                 else: return False, ""
 
             except Exception as e:
-                self.app.log(f"[{symbol}] 지표 계산 오류: {e}")
+                self.app.log(f"지표 계산 오류: {e}")
                 return False, ""
 
-            if indicator_value is not None and math.isnan(indicator_value): return False, ""
+            if indicator_value is not None and pd.isna(indicator_value): return False, ""
 
             lhs_val = indicator_value
             display_lhs = f"{indicator} {detail}({lhs_val:.4f})"
@@ -270,6 +277,8 @@ class MonitoringEngine:
             ma_val_2 = ma_series.iloc[-2 - shift]
             ma_val_3 = ma_series.iloc[-3 - shift]
 
+            if pd.isna(ma_val_1) or pd.isna(ma_val_2) or pd.isna(ma_val_3): return False, ""
+
             if detail == "Direction":
                 if value_str == "Rising" and ma_val_1 > ma_val_2: condition_met = True
                 elif value_str == "Falling" and ma_val_1 < ma_val_2: condition_met = True
@@ -300,7 +309,7 @@ class MonitoringEngine:
             if short_ma is None or long_ma is None or len(short_ma) < 1 + shift or len(long_ma) < 1 + shift: return False, ""
             short_ma_val = short_ma.iloc[-1 - shift]
             long_ma_val = long_ma.iloc[-1 - shift]
-            if long_ma_val == 0: return False, ""
+            if long_ma_val == 0 or pd.isna(short_ma_val) or pd.isna(long_ma_val): return False, ""
             percentage_diff = ((short_ma_val - long_ma_val) / long_ma_val) * 100
             try:
                 target_percentage = float(value_str)
@@ -314,23 +323,23 @@ class MonitoringEngine:
                 price_series_key = detail.split(' ')[0].lower()
                 price_series = df[price_series_key]
                 
-                if len(price_series) < 2 + shift:
-                    return False, ""
+                if len(price_series) < n + shift + 1: return False, ""
 
                 count = 0
-                for i in range(len(price_series) - 1 - shift):
+                # n개의 봉이 연속적인지 확인하려면 n번의 비교가 필요
+                for i in range(n):
                     current_index = -1 - shift - i
                     previous_index = -2 - shift - i
-                    if current_index < -len(price_series) or previous_index < -len(price_series):
+                    if abs(current_index) >= len(price_series) or abs(previous_index) >= len(price_series):
+                        count = 0 # 데이터가 부족하면 연속이 아님
                         break
                     
-                    # 연속 상승 또는 하락 확인
                     if "상승" in detail and price_series.iloc[current_index] > price_series.iloc[previous_index]:
                         count += 1
                     elif "하락" in detail and price_series.iloc[current_index] < price_series.iloc[previous_index]:
                         count += 1
                     else:
-                        break
+                        break # 연속이 깨지면 중단
                 
                 if eval(f"{count} {operator} {n}"):
                     condition_met = True
@@ -343,24 +352,24 @@ class MonitoringEngine:
             try:
                 n = int(value_str)
                 length = params.get('length', 20)
-                if len(df) < length + n + shift:
-                    return False, ""
+                if len(df) < length + n + shift: return False, ""
 
                 ma_series = df.ta.sma(length=length)
-                if ma_series is None or len(ma_series) < 2 + shift:
-                    return False, ""
+                if ma_series is None or len(ma_series) < n + shift + 1: return False, ""
 
                 count = 0
-                for i in range(len(ma_series) - 1 - shift):
+                for i in range(n):
                     current_index = -1 - shift - i
                     previous_index = -2 - shift - i
-                    if current_index < -len(ma_series) or previous_index < -len(ma_series):
+                    if abs(current_index) >= len(ma_series) or abs(previous_index) >= len(ma_series):
+                        count = 0
                         break
                     
                     current_val = ma_series.iloc[current_index]
                     previous_val = ma_series.iloc[previous_index]
 
                     if pd.isna(current_val) or pd.isna(previous_val):
+                        count = 0
                         break
 
                     if detail == "연속 상승" and current_val > previous_val:
@@ -377,7 +386,6 @@ class MonitoringEngine:
             except (ValueError, IndexError): return False, ""
 
         if condition_met:
-            self.app.log(f"[조건 만족] {symbol} ({timeframe}, {shift}봉 전) - {full_display_str}")
             return True, full_display_str
         
         return False, ""

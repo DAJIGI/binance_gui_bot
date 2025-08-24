@@ -1,8 +1,9 @@
 # main_gui.py
 import tkinter as tk
 import threading
+import time
 from tkinter import ttk, scrolledtext
-from binance_client import get_usdt_futures_symbols, get_futures_ticker_data
+from binance_client import get_usdt_futures_symbol_info, get_futures_ticker_data
 
 from monitoring_engine import MonitoringEngine
 
@@ -19,12 +20,18 @@ class App(tk.Tk):
         # 엔진 초기화
         self.engine = MonitoringEngine(self)
 
+        # 시세 업데이트 스레드 관련
+        self.price_updater_thread = None
+        self.price_updater_stop_event = threading.Event()
+        self.symbol_item_map = {} # {symbol: item_id}
+        self.price_precisions = {} # {symbol: precision}
+
         # --- 메인 레이아웃 (좌우 분할) ---
         main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         # --- 왼쪽 프레임 (코인 목록) ---
-        left_frame = ttk.LabelFrame(main_paned_window, text="코인 시세", padding="10")
+        left_frame = ttk.LabelFrame(main_paned_window, text="코인 시세 (3초마다 자동 갱신)", padding="10")
         main_paned_window.add(left_frame, weight=1)
 
         self.coin_list_tree = ttk.Treeview(
@@ -103,7 +110,7 @@ class App(tk.Tk):
         
         # --- 위젯 데이터 ---
         self.timeframe_options = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
-        coin_list = get_usdt_futures_symbols()
+        coin_list, self.price_precisions = get_usdt_futures_symbol_info()
         self.coin_options = ["All Coins"] + coin_list
         self.indicator_options = ["RSI", "Envelope", "BollingerBands", "MASlope", "MA_Compare", "Candle_Trend", "MA_Trend"]
         self.operator_options = [">", ">=", "<", "<=", "=="]
@@ -199,6 +206,8 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_indicator_details()
         self.populate_coin_list_table()
+        self.start_price_updater()
+
 
     def update_progress(self, current, total):
         if total > 0:
@@ -516,6 +525,7 @@ class App(tk.Tk):
 
     def on_closing(self):
         self.log("애플리케이션을 종료합니다...")
+        self.price_updater_stop_event.set() # 시세 업데이트 스레드 중지
         if self.engine.is_running:
             self.stop_monitoring()
             # Give the stop thread a moment to start and run
@@ -523,10 +533,35 @@ class App(tk.Tk):
         else:
             self.destroy()
 
+    def start_price_updater(self):
+        """시세 업데이트를 위한 백그라운드 스레드를 시작합니다."""
+        self.price_updater_stop_event.clear()
+        self.price_updater_thread = threading.Thread(target=self._price_update_loop, daemon=True)
+        self.price_updater_thread.start()
+        self.log("실시간 시세 업데이트를 시작합니다.")
+
+    def _price_update_loop(self):
+        """백그라운드에서 실행되며 주기적으로 시세 데이터를 가져오는 루프."""
+        while not self.price_updater_stop_event.is_set():
+            try:
+                tickers = get_futures_ticker_data()
+                if tickers:
+                    # GUI 업데이트는 메인 스레드에서 실행하도록 예약
+                    self.after(0, self.update_coin_list_table, tickers)
+            except Exception as e:
+                self.after(0, self.log, f"시세 업데이트 스레드 오류: {e}")
+            
+            # 3초 대기 (중지 이벤트를 확인하며)
+            self.price_updater_stop_event.wait(3)
+
     def populate_coin_list_table(self):
-        self.log("코인 시세 정보를 업데이트합니다...")
+        """코인 목록을 최초로 한번만 로딩하고, 각 코인의 Treeview item을 맵에 저장합니다."""
+        self.log("코인 목록을 최초로 로딩합니다...")
         try:
-            trading_symbols = set(get_usdt_futures_symbols())
+            # get_usdt_futures_symbol_info()는 심볼 리스트와 정밀도 맵을 모두 반환
+            trading_symbols, self.price_precisions = get_usdt_futures_symbol_info()
+            trading_symbols = set(trading_symbols)
+
             tickers = get_futures_ticker_data()
             if not tickers:
                 self.log("시세 정보를 가져오지 못했습니다.")
@@ -534,11 +569,10 @@ class App(tk.Tk):
 
             filtered_tickers = [t for t in tickers if t['symbol'] in trading_symbols]
 
-            # 기존 목록 삭제
             for item in self.coin_list_tree.get_children():
                 self.coin_list_tree.delete(item)
+            self.symbol_item_map.clear()
 
-            # 등락률 색상 태그 설정
             self.coin_list_tree.tag_configure("red", foreground="#d1403d")
             self.coin_list_tree.tag_configure("blue", foreground="#0a59f7")
 
@@ -549,7 +583,6 @@ class App(tk.Tk):
                     change_percent = float(ticker['priceChangePercent'])
                     volume_usd = float(ticker['quoteVolume'])
 
-                    # 거래대금 포맷 (K, M, B)
                     if volume_usd >= 1_000_000_000:
                         volume_str = f"{volume_usd / 1_000_000_000:.2f}B"
                     elif volume_usd >= 1_000_000:
@@ -557,61 +590,94 @@ class App(tk.Tk):
                     else:
                         volume_str = f"{volume_usd / 1_000:.2f}K"
 
-                    # 등락률 색상 태그
                     color_tag = "normal"
                     if change_percent > 0:
                         color_tag = "red"
                     elif change_percent < 0:
                         color_tag = "blue"
+                    
+                    precision = self.price_precisions.get(symbol, 4) # 없으면 기본 4자리
+                    price_str = f"{price:.{precision}f}"
 
-                    self.coin_list_tree.insert(
+                    item_id = self.coin_list_tree.insert(
                         "", tk.END,
-                        values=(i, symbol, f"{price:.4f}", f"{change_percent:+.2f}%", volume_str),
+                        values=(i, symbol, price_str, f"{change_percent:+.2f}%", volume_str),
                         tags=(color_tag,)
                     )
+                    self.symbol_item_map[symbol] = item_id
                 except (ValueError, KeyError):
-                    # 데이터가 불완전한 티커는 건너뜁니다.
                     pass
 
-            self.log(f"거래 가능한 {len(filtered_tickers)}개 코인 시세 업데이트 완료.")
+            self.log(f"거래 가능한 {len(self.symbol_item_map)}개 코인 목록 로딩 완료.")
         except Exception as e:
-            self.log(f"시세 정보 업데이트 중 오류 발생: {e}")
+            self.log(f"초기 코인 목록 로딩 중 오류 발생: {e}")
+
+    def update_coin_list_table(self, tickers):
+        """테이블을 다시 만들지 않고 기존 코인 목록의 값만 업데이트합니다."""
+        tickers_map = {t['symbol']: t for t in tickers}
+
+        for symbol, item_id in self.symbol_item_map.items():
+            ticker = tickers_map.get(symbol)
+            if not ticker or not self.coin_list_tree.exists(item_id):
+                continue
+
+            try:
+                price = float(ticker['lastPrice'])
+                change_percent = float(ticker['priceChangePercent'])
+                volume_usd = float(ticker['quoteVolume'])
+
+                if volume_usd >= 1_000_000_000:
+                    volume_str = f"{volume_usd / 1_000_000_000:.2f}B"
+                elif volume_usd >= 1_000_000:
+                    volume_str = f"{volume_usd / 1_000_000:.2f}M"
+                else:
+                    volume_str = f"{volume_usd / 1_000:.2f}K"
+
+                color_tag = "normal"
+                if change_percent > 0:
+                    color_tag = "red"
+                elif change_percent < 0:
+                    color_tag = "blue"
+                
+                current_values = self.coin_list_tree.item(item_id, 'values')
+                precision = self.price_precisions.get(symbol, 4)
+                price_str = f"{price:.{precision}f}"
+
+                self.coin_list_tree.item(item_id, 
+                    values=(current_values[0], current_values[1], price_str, f"{change_percent:+.2f}%", volume_str),
+                    tags=(color_tag,)
+                )
+            except (ValueError, KeyError):
+                continue
 
     def sort_treeview_column(self, col, reverse):
         """Treeview 칼럼을 클릭하여 정렬하는 함수"""
         try:
             data = [(self.coin_list_tree.set(item, col), item) for item in self.coin_list_tree.get_children('')]
         except tk.TclError:
-            # 칼럼이 존재하지 않을 경우 무시
             return
 
-        # 데이터 타입에 따른 정렬 키 설정
         def sort_key(item):
             value = item[0]
-            if col == "No" or col == "Price" or col == "Change":
-                # 숫자 변환을 위해 특수 문자(%, +) 제거
+            if col == "No":
+                try: return int(value)
+                except ValueError: return 0
+            if col == "Price" or col == "Change":
                 value = value.replace('%', '').replace('+', '')
-                try:
-                    return float(value)
-                except ValueError:
-                    return 0.0
+                try: return float(value)
+                except ValueError: return 0.0
             elif col == "Volume":
                 value_lower = value.lower()
                 num_part = value_lower.replace('k', '').replace('m', '').replace('b', '')
                 try:
                     num = float(num_part)
-                    if 'b' in value_lower:
-                        return num * 1_000_000_000
-                    if 'm' in value_lower:
-                        return num * 1_000_000
-                    if 'k' in value_lower:
-                        return num * 1_000
+                    if 'b' in value_lower: return num * 1_000_000_000
+                    if 'm' in value_lower: return num * 1_000_000
+                    if 'k' in value_lower: return num * 1_000
                     return num
-                except ValueError:
-                    return 0
-            return value # 코인 이름은 문자열로 정렬
+                except ValueError: return 0
+            return value
 
-        # 정렬 방향 결정
         if col == self.sort_column:
             self.sort_reverse = not self.sort_reverse
         else:
